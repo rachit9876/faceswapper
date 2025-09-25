@@ -1,42 +1,39 @@
 import streamlit as st
 import cv2
 import numpy as np
-import mediapipe as mp
 from PIL import Image
 
-# Load MediaPipe models
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True)
+# Load OpenCV face detector
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
 # Load base image once
 base_img = cv2.imread("baseimg.png")
 
-def get_landmarks(img):
-    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(rgb)
-    if not results.multi_face_landmarks:
+def get_face_region(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+    if len(faces) == 0:
         return None
-    landmarks = results.multi_face_landmarks[0]
-    h, w = img.shape[:2]
-    return np.array([[int(p.x * w), int(p.y * h)] for p in landmarks.landmark[:68]])
+    return faces[0]
 
 def face_swap(src_face, dst_img):
-    landmarks1 = get_landmarks(src_face)
-    landmarks2 = get_landmarks(dst_img)
-    if landmarks1 is None or landmarks2 is None:
+    src_region = get_face_region(src_face)
+    dst_region = get_face_region(dst_img)
+    if src_region is None or dst_region is None:
         return None
 
-    hull_index = cv2.convexHull(landmarks2, returnPoints=False)
-    hull1 = [landmarks1[i[0]] for i in hull_index]
-    hull2 = [landmarks2[i[0]] for i in hull_index]
-
-    mask = np.zeros(dst_img.shape, dtype=dst_img.dtype)
-    cv2.fillConvexPoly(mask, np.int32(hull2), (255, 255, 255))
-    r = cv2.boundingRect(np.float32([hull2]))
-    center = (r[0] + r[2]//2, r[1] + r[3]//2)
-
-    swapped = cv2.seamlessClone(src_face, dst_img, mask, center, cv2.NORMAL_CLONE)
-    return swapped
+    x1, y1, w1, h1 = src_region
+    x2, y2, w2, h2 = dst_region
+    
+    src_roi = src_face[y1:y1+h1, x1:x1+w1]
+    src_resized = cv2.resize(src_roi, (w2, h2))
+    
+    mask = np.full((h2, w2, 3), 255, dtype=np.uint8)
+    center = (x2 + w2//2, y2 + h2//2)
+    
+    result = dst_img.copy()
+    result[y2:y2+h2, x2:x2+w2] = src_resized
+    return result
 
 st.title("Base Image Face Swapper")
 
