@@ -16,6 +16,19 @@ def get_face_region(img):
         return None
     return faces[0]
 
+def create_face_mask(face_region, img_shape):
+    x, y, w, h = face_region
+    mask = np.zeros(img_shape[:2], dtype=np.uint8)
+    
+    # Create elliptical mask for more natural blending
+    center = (x + w//2, y + h//2)
+    axes = (w//2, h//2)
+    cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
+    
+    # Smooth the mask edges
+    mask = cv2.GaussianBlur(mask, (15, 15), 0)
+    return mask
+
 def face_swap(src_face, dst_img):
     src_region = get_face_region(src_face)
     dst_region = get_face_region(dst_img)
@@ -25,14 +38,30 @@ def face_swap(src_face, dst_img):
     x1, y1, w1, h1 = src_region
     x2, y2, w2, h2 = dst_region
     
+    # Extract and resize source face
     src_roi = src_face[y1:y1+h1, x1:x1+w1]
     src_resized = cv2.resize(src_roi, (w2, h2))
     
-    mask = np.full((h2, w2, 3), 255, dtype=np.uint8)
+    # Create mask for seamless cloning
+    mask = create_face_mask(dst_region, dst_img.shape)
+    
+    # Use seamless cloning for natural blending
     center = (x2 + w2//2, y2 + h2//2)
     
-    result = dst_img.copy()
-    result[y2:y2+h2, x2:x2+w2] = src_resized
+    try:
+        # Try seamless cloning first
+        result = cv2.seamlessClone(src_resized, dst_img, mask[y2:y2+h2, x2:x2+w2], center, cv2.NORMAL_CLONE)
+    except:
+        # Fallback to manual blending if seamless clone fails
+        result = dst_img.copy()
+        mask_3d = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR) / 255.0
+        
+        # Blend the faces
+        roi = result[y2:y2+h2, x2:x2+w2]
+        mask_roi = mask_3d[y2:y2+h2, x2:x2+w2]
+        blended = src_resized * mask_roi + roi * (1 - mask_roi)
+        result[y2:y2+h2, x2:x2+w2] = blended.astype(np.uint8)
+    
     return result
 
 st.title("Base Image Face Swapper")
