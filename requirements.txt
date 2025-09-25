@@ -1,6 +1,6 @@
 streamlit
 opencv-python
-cmake
-dlib==19.24.2
+mediapipe
 pillow
 numpy
+scipy

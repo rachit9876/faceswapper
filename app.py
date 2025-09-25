@@ -1,22 +1,24 @@
 import streamlit as st
 import cv2
 import numpy as np
-import dlib
+import mediapipe as mp
 from PIL import Image
 
-# Load models
-detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+# Load MediaPipe models
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True)
 
 # Load base image once
 base_img = cv2.imread("baseimg.png")
 
 def get_landmarks(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    faces = detector(gray)
-    if len(faces) == 0:
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(rgb)
+    if not results.multi_face_landmarks:
         return None
-    return np.array([[p.x, p.y] for p in predictor(gray, faces[0]).parts()])
+    landmarks = results.multi_face_landmarks[0]
+    h, w = img.shape[:2]
+    return np.array([[int(p.x * w), int(p.y * h)] for p in landmarks.landmark[:68]])
 
 def face_swap(src_face, dst_img):
     landmarks1 = get_landmarks(src_face)
