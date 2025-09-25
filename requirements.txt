@@ -1,4 +1,6 @@
 streamlit
-opencv-python-headless
+opencv-contrib-python-headless>=4.8.0
 pillow
 numpy
+mediapipe>=0.10.14
+scipy

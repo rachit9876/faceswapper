@@ -2,111 +2,174 @@ import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image
+from typing import Optional
 
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
-base_img = cv2.imread("baseimg.png")
+import mediapipe as mp
+from scipy.spatial import Delaunay
 
-def get_face_landmarks(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-    if len(faces) == 0:
-        return None, None
-    
-    x, y, w, h = faces[0]
-    face_roi = gray[y:y+h, x:x+w]
-    eyes = eye_cascade.detectMultiScale(face_roi)
-    
-    # Create key points based on face and eye detection
-    points = []
-    # Face corners
-    points.extend([(x, y), (x+w, y), (x, y+h), (x+w, y+h)])
-    # Face center and edges
-    points.extend([(x+w//2, y), (x, y+h//2), (x+w, y+h//2), (x+w//2, y+h)])
-    # Face quarter points
-    points.extend([(x+w//4, y+h//4), (x+3*w//4, y+h//4), (x+w//4, y+3*h//4), (x+3*w//4, y+3*h//4)])
-    
-    # Add eye positions if detected
-    for (ex, ey, ew, eh) in eyes[:2]:
-        points.append((x + ex + ew//2, y + ey + eh//2))
-    
-    return np.array(points), (x, y, w, h)
 
-def warp_triangle(img1, img2, t1, t2):
-    r1 = cv2.boundingRect(np.float32([t1]))
-    r2 = cv2.boundingRect(np.float32([t2]))
-    
-    t1_rect = [(t1[i][0] - r1[0], t1[i][1] - r1[1]) for i in range(3)]
-    t2_rect = [(t2[i][0] - r2[0], t2[i][1] - r2[1]) for i in range(3)]
-    
-    img1_rect = img1[r1[1]:r1[1] + r1[3], r1[0]:r1[0] + r1[2]]
-    
-    if img1_rect.size > 0:
-        warp_mat = cv2.getAffineTransform(np.float32(t1_rect), np.float32(t2_rect))
-        img2_rect = cv2.warpAffine(img1_rect, warp_mat, (r2[2], r2[3]))
-        
-        mask = np.zeros((r2[3], r2[2], 3), dtype=np.float32)
-        cv2.fillConvexPoly(mask, np.int32(t2_rect), (1.0, 1.0, 1.0))
-        
-        img2[r2[1]:r2[1]+r2[3], r2[0]:r2[0]+r2[2]] = img2[r2[1]:r2[1]+r2[3], r2[0]:r2[0]+r2[2]] * (1 - mask) + img2_rect * mask
+# ---------- Landmark detection (MediaPipe FaceMesh) ----------
+@st.cache_resource(show_spinner=False)
+def get_facemesh():
+    return mp.solutions.face_mesh.FaceMesh(
+        static_image_mode=True,
+        max_num_faces=1,
+        refine_landmarks=True,
+        min_detection_confidence=0.5,
+    )
 
-def face_swap(img1, img2):
-    points1, face1 = get_face_landmarks(img1)
-    points2, face2 = get_face_landmarks(img2)
-    
-    if points1 is None or points2 is None:
+
+def detect_landmarks_bgr(img_bgr: np.ndarray) -> Optional[np.ndarray]:
+    """Return 2D pixel coords of 468 FaceMesh landmarks as float32, or None if not found."""
+    h, w = img_bgr.shape[:2]
+    mesh = get_facemesh()
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    res = mesh.process(img_rgb)
+    if not res.multi_face_landmarks:
         return None
-    
-    # Ensure same number of points
-    min_points = min(len(points1), len(points2))
-    points1 = points1[:min_points]
-    points2 = points2[:min_points]
-    
-    img1_warped = np.copy(img2)
-    
-    # Simple triangulation using face bounds
-    x2, y2, w2, h2 = face2
-    triangles = [
-        [(x2, y2), (x2+w2//2, y2), (x2, y2+h2//2)],
-        [(x2+w2, y2), (x2+w2//2, y2), (x2+w2, y2+h2//2)],
-        [(x2, y2+h2), (x2+w2//2, y2+h2), (x2, y2+h2//2)],
-        [(x2+w2, y2+h2), (x2+w2//2, y2+h2), (x2+w2, y2+h2//2)],
-        [(x2+w2//2, y2), (x2+w2//2, y2+h2), (x2, y2+h2//2)],
-        [(x2+w2//2, y2), (x2+w2//2, y2+h2), (x2+w2, y2+h2//2)]
-    ]
-    
-    x1, y1, w1, h1 = face1
-    src_triangles = [
-        [(x1, y1), (x1+w1//2, y1), (x1, y1+h1//2)],
-        [(x1+w1, y1), (x1+w1//2, y1), (x1+w1, y1+h1//2)],
-        [(x1, y1+h1), (x1+w1//2, y1+h1), (x1, y1+h1//2)],
-        [(x1+w1, y1+h1), (x1+w1//2, y1+h1), (x1+w1, y1+h1//2)],
-        [(x1+w1//2, y1), (x1+w1//2, y1+h1), (x1, y1+h1//2)],
-        [(x1+w1//2, y1), (x1+w1//2, y1+h1), (x1+w1, y1+h1//2)]
-    ]
-    
-    for i in range(len(triangles)):
-        warp_triangle(img1, img1_warped, src_triangles[i], triangles[i])
-    
-    # Create smooth mask
-    mask = np.zeros(img2.shape[:2], dtype=np.uint8)
-    cv2.ellipse(mask, (x2+w2//2, y2+h2//2), (w2//2, h2//2), 0, 0, 360, 255, -1)
-    mask = cv2.GaussianBlur(mask, (15, 15), 0)
-    mask_3d = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR) / 255.0
-    
-    result = img2 * (1 - mask_3d) + img1_warped * mask_3d
-    return result.astype(np.uint8)
+    lm = res.multi_face_landmarks[0]
+    pts = np.array([(p.x * w, p.y * h) for p in lm.landmark], dtype=np.float32)
+    return pts
 
+
+# ---------- Geometry helpers ----------
+def triangulate(points: np.ndarray) -> np.ndarray:
+    """Delaunay triangulation returning Nx3 indices of the input points."""
+    # Use scipy to get stable indices directly
+    tri = Delaunay(points)
+    return tri.simplices.astype(np.int32)
+
+
+def warp_triangle(src_img, dst_img, src_tri, dst_tri):
+    # Bounding rects
+    r1 = cv2.boundingRect(np.float32(src_tri))
+    r2 = cv2.boundingRect(np.float32(dst_tri))
+
+    # Offset triangle points by top-lefts
+    src_offset = np.float32([[src_tri[i][0] - r1[0], src_tri[i][1] - r1[1]] for i in range(3)])
+    dst_offset = np.float32([[dst_tri[i][0] - r2[0], dst_tri[i][1] - r2[1]] for i in range(3)])
+
+    # Crop patches
+    src_patch = src_img[r1[1] : r1[1] + r1[3], r1[0] : r1[0] + r1[2]]
+    if src_patch.size == 0:
+        return
+
+    # Affine warp
+    M = cv2.getAffineTransform(src_offset, dst_offset)
+    warped = cv2.warpAffine(src_patch, M, (r2[2], r2[3]), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+
+    # Mask and composite into destination region
+    mask = np.zeros((r2[3], r2[2], 3), dtype=np.float32)
+    cv2.fillConvexPoly(mask, np.int32(dst_offset), (1.0, 1.0, 1.0), lineType=cv2.LINE_AA)
+
+    dst_region = dst_img[r2[1] : r2[1] + r2[3], r2[0] : r2[0] + r2[2]]
+    np.multiply(dst_region, (1.0 - mask), out=dst_region, casting="unsafe")
+    dst_region += warped * mask
+
+
+def piecewise_affine_warp(src_bgr: np.ndarray, dst_bgr: np.ndarray, src_pts: np.ndarray, dst_pts: np.ndarray) -> np.ndarray:
+    """Warp source face onto destination geometry using piecewise affine triangles."""
+    h, w = dst_bgr.shape[:2]
+    warped = np.copy(dst_bgr)
+
+    # Triangulate on destination points (more stable in target space)
+    tris = triangulate(dst_pts)
+
+    for i, j, k in tris:
+        src_tri = np.float32([src_pts[i], src_pts[j], src_pts[k]])
+        dst_tri = np.float32([dst_pts[i], dst_pts[j], dst_pts[k]])
+        warp_triangle(src_bgr, warped, src_tri, dst_tri)
+
+    return warped
+
+
+def smooth_mask(mask: np.ndarray, ksize: int) -> np.ndarray:
+    k = max(1, ksize | 1)  # ensure odd
+    return cv2.GaussianBlur(mask, (k, k), 0)
+
+
+def face_swap(src_bgr: np.ndarray, dst_bgr: np.ndarray, feather: int = 25, clone_mode: str = "normal") -> Optional[np.ndarray]:
+    """Return swapped image (src face -> dst image) or None if face not found."""
+    src_pts = detect_landmarks_bgr(src_bgr)
+    dst_pts = detect_landmarks_bgr(dst_bgr)
+    if src_pts is None or dst_pts is None:
+        return None
+
+    # Warp source appearance to destination geometry
+    warped_src = piecewise_affine_warp(src_bgr, dst_bgr, src_pts, dst_pts)
+
+    # Build mask from destination convex hull of all points
+    hull = cv2.convexHull(dst_pts.astype(np.int32))
+    mask = np.zeros(dst_bgr.shape[:2], dtype=np.uint8)
+    cv2.fillConvexPoly(mask, hull, 255)
+    if feather > 0:
+        mask = smooth_mask(mask, feather)
+
+    # Seamless clone
+    center = tuple(np.mean(hull.reshape(-1, 2), axis=0).astype(int))
+    mode = cv2.NORMAL_CLONE if clone_mode == "normal" else cv2.MIXED_CLONE
+    try:
+        out = cv2.seamlessClone(warped_src, dst_bgr, mask, center, mode)
+    except cv2.error:
+        # Fallback linear blend
+        mask3 = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
+        out = (dst_bgr.astype(np.float32) * (1 - mask3) + warped_src.astype(np.float32) * mask3).astype(np.uint8)
+    return out
+
+
+# ---------- Streamlit UI ----------
+st.set_page_config(page_title="Face Swapper (MediaPipe)", page_icon="🧪")
 st.title("Face Swapper")
+st.caption("MediaPipe FaceMesh + piecewise affine warp + seamless clone")
 
-uploaded_face = st.file_uploader("Upload a face image", type=["jpg","jpeg","png"])
+col1, col2 = st.columns(2)
+with col1:
+    up_src = st.file_uploader("Source face (the face to paste)", type=["jpg", "jpeg", "png"], key="src")
+with col2:
+    up_dst = st.file_uploader("Target image (where to paste)", type=["jpg", "jpeg", "png"], key="dst")
 
-if uploaded_face:
-    face_img = np.array(Image.open(uploaded_face).convert("RGB"))[:,:,::-1]
-    
-    result = face_swap(face_img, base_img)
-    if result is not None:
-        st.image(result[:,:,::-1], caption="Face Swapped Result")
-        st.download_button("Download Result", data=cv2.imencode(".png", result)[1].tobytes(), file_name="swapped.png", mime="image/png")
+feather = st.slider("Feather (mask blur radius)", 0, 51, 25, step=2)
+clone_mode = st.selectbox("Blend mode", ["normal", "mixed"], index=0, help="Try 'mixed' if colors look off")
+
+# Load default destination if none uploaded
+default_dst = cv2.imread("baseimg.png")
+if default_dst is None:
+    st.warning("Missing default destination image 'baseimg.png' in the project folder.")
+
+btn = st.button("Swap face", type="primary")
+
+def load_bgr(file) -> Optional[np.ndarray]:
+    if file is None:
+        return None
+    try:
+        arr = np.array(Image.open(file).convert("RGB"))[:, :, ::-1]
+        return arr
+    except Exception:
+        return None
+
+src_bgr = load_bgr(up_src)
+dst_bgr = load_bgr(up_dst) if up_dst else (default_dst.copy() if default_dst is not None else None)
+
+if btn:
+    if src_bgr is None or dst_bgr is None:
+        st.error("Please provide both a source face and a target image (or ensure baseimg.png exists).")
     else:
-        st.warning("Could not detect faces in one of the images.")
+        with st.spinner("Detecting landmarks and swapping..."):
+            result = face_swap(src_bgr, dst_bgr, feather=feather, clone_mode=clone_mode)
+        if result is None:
+            st.warning("Could not detect a face in one of the images. Try a clearer, frontal face.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.image(cv2.cvtColor(src_bgr, cv2.COLOR_BGR2RGB), caption="Source face", use_container_width=True)
+            with c2:
+                st.image(cv2.cvtColor(dst_bgr, cv2.COLOR_BGR2RGB), caption="Target image", use_container_width=True)
+            with c3:
+                st.image(cv2.cvtColor(result, cv2.COLOR_BGR2RGB), caption="Swapped result", use_container_width=True)
+
+            st.download_button(
+                "Download result",
+                data=cv2.imencode(".png", result)[1].tobytes(),
+                file_name="swapped.png",
+                mime="image/png",
+            )
