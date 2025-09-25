@@ -1,7 +1,6 @@
 import os
 import streamlit as st
 from PIL import Image, ExifTags
-from streamlit_cropper import st_cropper
 from swap_face import check_and_convert_orientation_conv_gray, swap
 import shutil
 
@@ -88,31 +87,25 @@ def main():
         pil_image2 = fix_orientation(pil_image2)
 
         
-        col1, col2,col3 = st.columns(3)
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.text("Cropped Base Image:")
-            cropped_image1 = st_cropper(pil_image1)
-            if cropped_image1:
-                # Save the cropped image
-                cropped_image1_path = os.path.join(CROPPED_FOLDER, "cropped_image1.jpg")
-                cropped_image1.save(cropped_image1_path)
+            st.text("Base Image:")
+            st.image(pil_image1)
+            cropped_image1_path = os.path.join(CROPPED_FOLDER, "cropped_image1.jpg")
+            pil_image1.save(cropped_image1_path)
         with col2:
-            st.text("Cropped Mask Image:")
-            cropped_image2 = st_cropper(pil_image2)
-            if cropped_image2:
-                # Save the cropped image
-                cropped_image2_path = os.path.join(CROPPED_FOLDER, "cropped_image2.jpg")
-                cropped_image2.save(cropped_image2_path)
+            st.text("Mask Image:")
+            st.image(pil_image2)
+            cropped_image2_path = os.path.join(CROPPED_FOLDER, "cropped_image2.jpg")
+            pil_image2.save(cropped_image2_path)
         with col3:
             st.text("Output:")
-            if 'cropped_image1_path' in locals() and 'cropped_image2_path' in locals():
-                try:
-                    # Process and convert the images
-                    x = check_and_convert_orientation_conv_gray(cropped_image1_path)
-                    y = check_and_convert_orientation_conv_gray(cropped_image2_path)
-                    st.image(swap(x, y))
-                except Exception as e:
-                    st.error(f"Selection wrong please select face (head to chin)")\
+            try:
+                x = check_and_convert_orientation_conv_gray(cropped_image1_path)
+                y = check_and_convert_orientation_conv_gray(cropped_image2_path)
+                st.image(swap(x, y))
+            except Exception as e:
+                st.error(f"Processing error: {str(e)}")\
     
         st.write("** Output Changes with respect to the cropping of images")
 
