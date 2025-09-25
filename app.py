@@ -2,24 +2,35 @@ import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image
-import mediapipe as mp
 
-mp_face_mesh = mp.solutions.face_mesh
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
 base_img = cv2.imread("baseimg.png")
 
-def get_landmarks(img):
-    with mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5) as face_mesh:
-        results = face_mesh.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-        if not results.multi_face_landmarks:
-            return None
-        landmarks = results.multi_face_landmarks[0]
-        return np.array([[int(p.x * img.shape[1]), int(p.y * img.shape[0])] for p in landmarks.landmark])
-
-def get_face_mask(landmarks, img_shape):
-    mask = np.zeros(img_shape[:2], dtype=np.uint8)
-    hull = cv2.convexHull(landmarks)
-    cv2.fillPoly(mask, [hull], 255)
-    return cv2.GaussianBlur(mask, (15, 15), 0)
+def get_face_landmarks(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+    if len(faces) == 0:
+        return None, None
+    
+    x, y, w, h = faces[0]
+    face_roi = gray[y:y+h, x:x+w]
+    eyes = eye_cascade.detectMultiScale(face_roi)
+    
+    # Create key points based on face and eye detection
+    points = []
+    # Face corners
+    points.extend([(x, y), (x+w, y), (x, y+h), (x+w, y+h)])
+    # Face center and edges
+    points.extend([(x+w//2, y), (x, y+h//2), (x+w, y+h//2), (x+w//2, y+h)])
+    # Face quarter points
+    points.extend([(x+w//4, y+h//4), (x+3*w//4, y+h//4), (x+w//4, y+3*h//4), (x+3*w//4, y+3*h//4)])
+    
+    # Add eye positions if detected
+    for (ex, ey, ew, eh) in eyes[:2]:
+        points.append((x + ex + ew//2, y + ey + eh//2))
+    
+    return np.array(points), (x, y, w, h)
 
 def warp_triangle(img1, img2, t1, t2):
     r1 = cv2.boundingRect(np.float32([t1]))
@@ -30,61 +41,63 @@ def warp_triangle(img1, img2, t1, t2):
     
     img1_rect = img1[r1[1]:r1[1] + r1[3], r1[0]:r1[0] + r1[2]]
     
-    warp_mat = cv2.getAffineTransform(np.float32(t1_rect), np.float32(t2_rect))
-    img2_rect = cv2.warpAffine(img1_rect, warp_mat, (r2[2], r2[3]))
-    
-    mask = np.zeros((r2[3], r2[2], 3), dtype=np.float32)
-    cv2.fillConvexPoly(mask, np.int32(t2_rect), (1.0, 1.0, 1.0))
-    
-    img2[r2[1]:r2[1]+r2[3], r2[0]:r2[0]+r2[2]] = img2[r2[1]:r2[1]+r2[3], r2[0]:r2[0]+r2[2]] * (1 - mask) + img2_rect * mask
+    if img1_rect.size > 0:
+        warp_mat = cv2.getAffineTransform(np.float32(t1_rect), np.float32(t2_rect))
+        img2_rect = cv2.warpAffine(img1_rect, warp_mat, (r2[2], r2[3]))
+        
+        mask = np.zeros((r2[3], r2[2], 3), dtype=np.float32)
+        cv2.fillConvexPoly(mask, np.int32(t2_rect), (1.0, 1.0, 1.0))
+        
+        img2[r2[1]:r2[1]+r2[3], r2[0]:r2[0]+r2[2]] = img2[r2[1]:r2[1]+r2[3], r2[0]:r2[0]+r2[2]] * (1 - mask) + img2_rect * mask
 
 def face_swap(img1, img2):
-    landmarks1 = get_landmarks(img1)
-    landmarks2 = get_landmarks(img2)
+    points1, face1 = get_face_landmarks(img1)
+    points2, face2 = get_face_landmarks(img2)
     
-    if landmarks1 is None or landmarks2 is None:
+    if points1 is None or points2 is None:
         return None
     
-    # Use key facial points for triangulation
-    face_points = [10, 151, 9, 175, 136, 150, 149, 176, 148, 152, 377, 400, 378, 379, 365, 397, 288, 361, 323]
-    
-    points1 = landmarks1[face_points]
-    points2 = landmarks2[face_points]
+    # Ensure same number of points
+    min_points = min(len(points1), len(points2))
+    points1 = points1[:min_points]
+    points2 = points2[:min_points]
     
     img1_warped = np.copy(img2)
     
-    # Delaunay triangulation
-    rect = (0, 0, img2.shape[1], img2.shape[0])
-    dt = cv2.Subdiv2D(rect)
+    # Simple triangulation using face bounds
+    x2, y2, w2, h2 = face2
+    triangles = [
+        [(x2, y2), (x2+w2//2, y2), (x2, y2+h2//2)],
+        [(x2+w2, y2), (x2+w2//2, y2), (x2+w2, y2+h2//2)],
+        [(x2, y2+h2), (x2+w2//2, y2+h2), (x2, y2+h2//2)],
+        [(x2+w2, y2+h2), (x2+w2//2, y2+h2), (x2+w2, y2+h2//2)],
+        [(x2+w2//2, y2), (x2+w2//2, y2+h2), (x2, y2+h2//2)],
+        [(x2+w2//2, y2), (x2+w2//2, y2+h2), (x2+w2, y2+h2//2)]
+    ]
     
-    for p in points2:
-        dt.insert((int(p[0]), int(p[1])))
+    x1, y1, w1, h1 = face1
+    src_triangles = [
+        [(x1, y1), (x1+w1//2, y1), (x1, y1+h1//2)],
+        [(x1+w1, y1), (x1+w1//2, y1), (x1+w1, y1+h1//2)],
+        [(x1, y1+h1), (x1+w1//2, y1+h1), (x1, y1+h1//2)],
+        [(x1+w1, y1+h1), (x1+w1//2, y1+h1), (x1+w1, y1+h1//2)],
+        [(x1+w1//2, y1), (x1+w1//2, y1+h1), (x1, y1+h1//2)],
+        [(x1+w1//2, y1), (x1+w1//2, y1+h1), (x1+w1, y1+h1//2)]
+    ]
     
-    triangles = dt.getTriangleList()
+    for i in range(len(triangles)):
+        warp_triangle(img1, img1_warped, src_triangles[i], triangles[i])
     
-    for t in triangles:
-        pt1 = (int(t[0]), int(t[1]))
-        pt2 = (int(t[2]), int(t[3]))
-        pt3 = (int(t[4]), int(t[5]))
-        
-        # Find indices in points2
-        ind1 = np.where((points2 == pt1).all(axis=1))[0]
-        ind2 = np.where((points2 == pt2).all(axis=1))[0]
-        ind3 = np.where((points2 == pt3).all(axis=1))[0]
-        
-        if len(ind1) > 0 and len(ind2) > 0 and len(ind3) > 0:
-            t1 = [points1[ind1[0]], points1[ind2[0]], points1[ind3[0]]]
-            t2 = [pt1, pt2, pt3]
-            warp_triangle(img1, img1_warped, t1, t2)
-    
-    # Create mask and blend
-    mask = get_face_mask(landmarks2, img2.shape)
+    # Create smooth mask
+    mask = np.zeros(img2.shape[:2], dtype=np.uint8)
+    cv2.ellipse(mask, (x2+w2//2, y2+h2//2), (w2//2, h2//2), 0, 0, 360, 255, -1)
+    mask = cv2.GaussianBlur(mask, (15, 15), 0)
     mask_3d = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR) / 255.0
     
     result = img2 * (1 - mask_3d) + img1_warped * mask_3d
     return result.astype(np.uint8)
 
-st.title("Real Face Swapper")
+st.title("Face Swapper")
 
 uploaded_face = st.file_uploader("Upload a face image", type=["jpg","jpeg","png"])
 
